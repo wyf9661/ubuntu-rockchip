@@ -46,7 +46,7 @@ jobs:
 
       - name: Build
         shell: bash
-        run: sudo ./build.sh --board=orangepi-5-plus --project=preinstalled-server --kernel=rockchip-6.1 --kernel-only
+        run: sudo ./build.sh --board=orangepi-5-plus --project=preinstalled-server --release=jammy --kernel=rockchip-6.1 --kernel-only
 
       - name: Upload Kernel to Release
         uses: ncipollo/release-action@main
