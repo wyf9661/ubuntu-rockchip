@@ -92,14 +92,14 @@ mkdir -p ${mount_point}
 dd if=/dev/zero of="${disk}" count=4096 bs=512
 parted --script "${disk}" \
 mklabel gpt \
-mkpart primary fat32 16MiB 528MiB \
-mkpart primary ext4 528MiB 100%
+mkpart primary ext4 16MiB 1040MiB \
+mkpart primary ext4 1040MiB 100%
 
 # Create partitions
 {
     echo "t"
     echo "1"
-    echo "BC13C2FF-59E6-4262-A352-B275FD6F7172"
+    echo "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
     echo "t"
     echo "2"
     echo "0FC63DAF-8483-4772-8E79-3D69D8477DE4"
@@ -127,13 +127,13 @@ wait_loopdev "${disk}${partition_char}1" 60 || {
 sleep 1
 
 # Generate random uuid for bootfs
-boot_uuid=$(uuidgen | head -c8)
+boot_uuid=$(uuidgen)
 
 # Generate random uuid for rootfs
 root_uuid=$(uuidgen)
 
 # Create filesystems on partitions
-mkfs.vfat -i "${boot_uuid}" -F32 -n system-boot "${disk}${partition_char}1"
+mkfs.ext4 -U "${boot_uuid}" -L system-boot "${disk}${partition_char}1"
 dd if=/dev/zero of="${disk}${partition_char}2" bs=1KB count=10 > /dev/null
 mkfs.ext4 -U "${root_uuid}" -L writable "${disk}${partition_char}2"
 
@@ -149,108 +149,43 @@ tar -xpf "${rootfs}" -C ${mount_point}/writable
 [ -z "${img##*desktop*}" ] && bootargs="quiet splash plymouth.ignore-serial-consoles" || bootargs=""
 
 # Create fstab entries
-boot_uuid="${boot_uuid:0:4}-${boot_uuid:4:4}"
 mkdir -p ${mount_point}/writable/boot/firmware
 cat > ${mount_point}/writable/etc/fstab << EOF
 # <file system>     <mount point>  <type>  <options>   <dump>  <fsck>
-UUID=${boot_uuid^^} /boot/firmware vfat    defaults    0       2
+UUID=${boot_uuid,,} /boot          ext4    defaults    0       2
 UUID=${root_uuid,,} /              ext4    defaults,x-systemd.growfs    0       1
 EOF
 
-if [[ ${RELEASE} == "jammy" ]]; then
-
-# Uboot script
-cat > ${mount_point}/system-boot/boot.cmd << 'EOF'
-# This is a boot script for U-Boot
-#
-# Recompile with:
-# mkimage -A arm64 -O linux -T script -C none -n "Boot Script" -d boot.cmd boot.scr
-
-setenv load_addr "0x7000000"
-setenv overlay_error "false"
-
-echo "Boot script loaded from ${devtype} ${devnum}"
-
-if test -e ${devtype} ${devnum}:${distro_bootpart} /ubuntuEnv.txt; then
-    load ${devtype} ${devnum}:${distro_bootpart} ${load_addr} /ubuntuEnv.txt
-    env import -t ${load_addr} ${filesize}
-fi
-
-load ${devtype} ${devnum}:${distro_bootpart} ${fdt_addr_r} ${fdtfile}
-fdt addr ${fdt_addr_r} && fdt resize 0x10000
-
-for overlay_file in ${overlays}; do
-    for file in "${overlay_prefix}-${overlay_file}.dtbo ${overlay_prefix}-${overlay_file} ${overlay_file}.dtbo ${overlay_file}"; do
-        test -e ${devtype} ${devnum}:${distro_bootpart} /overlays/${file} \
-        && load ${devtype} ${devnum}:${distro_bootpart} ${fdtoverlay_addr_r} /overlays/${file} \
-        && echo "Applying device tree overlay: /overlays/${file}" \
-        && fdt apply ${fdtoverlay_addr_r} || setenv overlay_error "true"
-    done
-done
-if test "${overlay_error}" = "true"; then
-    echo "Error applying device tree overlays, restoring original device tree"
-    load ${devtype} ${devnum}:${distro_bootpart} ${fdt_addr_r} ${fdtfile}
-fi
-
-load ${devtype} ${devnum}:${distro_bootpart} ${kernel_addr_r} /vmlinuz
-load ${devtype} ${devnum}:${distro_bootpart} ${ramdisk_addr_r} /initrd.img
-
-booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdt_addr_r}
-EOF
-mkimage -A arm64 -O linux -T script -C none -n "Boot Script" -d ${mount_point}/system-boot/boot.cmd ${mount_point}/system-boot/boot.scr
-
 # Uboot env
-cat > ${mount_point}/system-boot/ubuntuEnv.txt << EOF
-bootargs=root=UUID=${root_uuid} rootfstype=ext4 rootwait rw console=ttyS2,1500000 console=tty1 cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory swapaccount=1 systemd.unified_cgroup_hierarchy=0 ${bootargs}
-fdtfile=${DEVICE_TREE_FILE}
-overlay_prefix=${OVERLAY_PREFIX}
-overlays=
+echo "console=ttyFIQ0,1500000n8 earlycon rootwait rw console=tty1 cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory ${bootargs}" > ${mount_point}/writable/etc/kernel/cmdline
+
+mv ${mount_point}/writable/boot/* ${mount_point}/system-boot/
+mount -o bind ${mount_point}/system-boot/ ${mount_point}/writable/boot
+
+# Mount the temporary API filesystems
+mkdir -p ${mount_point}/writable/{proc,sys,run,dev,dev/pts}
+mount -t proc /proc ${mount_point}/writable/proc
+mount -o bind /dev ${mount_point}/writable/dev
+mount -o bind /dev/pts ${mount_point}/writable/dev/pts
+
+touch ${mount_point}/writable/etc/kernel/cmdline
+mkdir -p ${mount_point}/writable/usr/share/u-boot-menu/conf.d/
+cat << EOF >> ${mount_point}/writable/usr/share/u-boot-menu/conf.d/ubuntu.conf
+U_BOOT_PROMPT="1"
+U_BOOT_PARAMETERS="\$(cat /etc/kernel/cmdline)"
+U_BOOT_TIMEOUT="10"
+U_BOOT_FDT="device-tree/rockchip/${DEVICE_TREE_FILE}"
+U_BOOT_FDT_DIR="/dtb-"
+U_BOOT_FDT_OVERLAYS_DIR="/dtb-"
+U_BOOT_SYNC_DTBS="true"
 EOF
 
 # Add flash kernel override
-cat << EOF >> ${mount_point}/writable/etc/flash-kernel/db
-Machine: *
-Kernel-Flavors: any
-Method: pi
-Boot-Kernel-Path: /boot/firmware/vmlinuz
-Boot-Initrd-Path: /boot/firmware/initrd.img
-EOF
+chroot ${mount_point}/writable/ /bin/bash -c "/etc/kernel/postinst.d/zz-u-boot-menu \$(linux-version list --paths | linux-version sort --reverse | cut -d' ' -f1)"
 
-    # Mount the temporary API filesystems
-    mkdir -p ${mount_point}/writable/{proc,sys,run,dev,dev/pts}
-    mount -t proc /proc ${mount_point}/writable/proc
-    mount -o bind /dev ${mount_point}/writable/dev
-    mount -o bind /dev/pts ${mount_point}/writable/dev/pts
-    
-    # Populate the boot firmware path
-	mkdir -p ${mount_point}/writable/boot/firmware
-    chroot ${mount_point}/writable /bin/bash -c "FK_FORCE=yes flash-kernel"
-
-    # Umount temporary API filesystems
-    umount -lf ${mount_point}/writable/dev/pts 2> /dev/null || true
-    umount -lf ${mount_point}/writable/* 2> /dev/null || true
-
-else
-    echo LINUX_KERNEL_CMDLINE="\"console=ttyS2,1500000 console=tty1 rootwait rw cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory ${bootargs}"\" > ${mount_point}/writable/etc/default/flash-kernel
-    echo LINUX_KERNEL_CMDLINE_DEFAULTS="\""\" >> ${mount_point}/writable/etc/default/flash-kernel
-
-    # Mount the temporary API filesystems
-    mkdir -p ${mount_point}/writable/{proc,sys,run,dev,dev/pts}
-    mount -t proc /proc ${mount_point}/writable/proc
-    mount -o bind /dev ${mount_point}/writable/dev
-    mount -o bind /dev/pts ${mount_point}/writable/dev/pts
-
-    # Populate the boot firmware path
-    mkdir -p ${mount_point}/writable/boot/firmware
-    chroot ${mount_point}/writable /bin/bash -c "FK_FORCE=yes FK_MACHINE='${FLASH_KERNEL_MACHINE_MODEL}' update-initramfs -u"
-
-    # Umount temporary API filesystems
-    umount -lf ${mount_point}/writable/dev/pts 2> /dev/null || true
-    umount -lf ${mount_point}/writable/* 2> /dev/null || true
-fi
-
-# Copy the device trees, kernel, and initrd to the boot partition
-mv ${mount_point}/writable/boot/firmware/* ${mount_point}/system-boot/
+# Umount temporary API filesystems
+umount -lf ${mount_point}/writable/dev/pts 2> /dev/null || true
+umount -lf ${mount_point}/writable/* 2> /dev/null || true
 
 # Write bootloader to disk image
 if [ -f "${mount_point}/writable/usr/lib/u-boot/u-boot-rockchip.bin" ]; then

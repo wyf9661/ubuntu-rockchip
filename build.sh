@@ -155,7 +155,7 @@ if [ -n "${KERNEL_TARGET}" ]; then
         for file in config/kernels/*; do
             if [ "${KERNEL_TARGET}" == "$(basename "${file%.conf}")" ]; then
                 # shellcheck source=/dev/null
-                source "${file}"
+                set -o allexport && source "${file}" && set +o allexport
                 break 2
             fi
         done
@@ -164,8 +164,30 @@ if [ -n "${KERNEL_TARGET}" ]; then
     done
 fi
 
+
+if [ "${RELEASE}" == "help" ]; then
+    for file in config/releases/*; do
+        basename "${file%.sh}"
+    done
+    exit 0
+fi
+
+if [ -n "${RELEASE}" ]; then
+    while :; do
+        for file in config/releases/*; do
+            if [ "${RELEASE}" == "$(basename "${file%.sh}")" ]; then
+                # shellcheck source=/dev/null
+                source "${file}"
+                break 2
+            fi
+        done
+        echo "Error: \"${RELEASE}\" is an unsupported release"
+        exit 1
+    done
+fi
+
 # No board param passed
-if [ -z "${BOARD}" ] || [ -z "${KERNEL_TARGET}" ]; then
+if [ -z "${BOARD}" ] || [ -z "${KERNEL_TARGET}" ] || [ -z "${RELEASE}" ]; then
     usage
     exit 1
 fi
